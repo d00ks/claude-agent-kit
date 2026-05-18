@@ -78,6 +78,7 @@ if [ "$#" -eq 0 ] && [ "$TTY_AVAILABLE" = "1" ]; then
       read -r BUILDER_TG_ANS
       [ -n "$BUILDER_TG_ANS" ] && export BUILDER_TELEGRAM_ID="$BUILDER_TG_ANS"
       EXTRA_FLAGS+=(--bootstrap --managed)
+      MANAGED_MODE=1
       echo ""
       echo "[install.sh] managed-service mode → REPO=$REPO, BUILDER_NAME=${BUILDER_NAME:-?}, BUILDER_TELEGRAM_ID=${BUILDER_TELEGRAM_ID:-?}"
       ;;
@@ -99,6 +100,95 @@ prompt_yes() {
   read -r ans
   case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
+
+# ---------- helpers: brew + gh + auth on fresh machines ----------
+
+ensure_brew() {
+  # macOS only. Idempotent. Installs Homebrew + sources its shellenv so the
+  # current script + future shells find it.
+  [ "$UNAME" = "Darwin" ] || return 0
+  if command -v brew >/dev/null 2>&1; then return 0; fi
+  # Homebrew install requires Xcode CLT. Trigger the install if missing —
+  # ships with `git`, so this also unblocks ensure_git below.
+  if ! xcode-select -p >/dev/null 2>&1; then
+    say "→ Xcode Command Line Tools missing — installing (GUI prompt will appear)"
+    xcode-select --install 2>/dev/null || true
+    die "Accept the macOS CLT GUI prompt, wait for it to finish (~5 min), then re-run this installer."
+  fi
+  say "→ installing Homebrew (will sudo-prompt once)"
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  # Source the new brew shellenv so this script can find it.
+  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"
+  fi
+  command -v brew >/dev/null 2>&1 || die "Homebrew installed but not on PATH — restart your shell and re-run."
+}
+
+ensure_gh() {
+  if command -v gh >/dev/null 2>&1; then return 0; fi
+  say "→ installing gh CLI"
+  case "$UNAME" in
+    Darwin)
+      ensure_brew
+      brew install gh
+      ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        # GitHub's apt repo setup — needed because Debian/Ubuntu defaults don't ship gh.
+        type -p curl >/dev/null || sudo apt-get update -qq && sudo apt-get install -y curl
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
+        sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+        sudo apt-get update -qq && sudo apt-get install -y gh
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y dnf-plugins-core
+        sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+        sudo dnf install -y gh
+      elif command -v yum >/dev/null 2>&1; then
+        sudo yum-config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+        sudo yum install -y gh
+      elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm github-cli
+      else die "no supported package manager (apt/dnf/yum/pacman) — install gh manually from https://cli.github.com + re-run"
+      fi
+      ;;
+    *) die "unsupported platform for gh auto-install: $UNAME" ;;
+  esac
+  command -v gh >/dev/null 2>&1 || die "gh installed but not on PATH — restart shell and re-run"
+  say "✓ gh: $(gh --version | head -1)"
+}
+
+ensure_gh_authed() {
+  # Idempotent. If gh is authed, returns immediately. Otherwise runs
+  # `gh auth login --hostname github.com --git-protocol https --web` so the
+  # operator gets browser-based device-flow auth.
+  if gh auth status >/dev/null 2>&1; then return 0; fi
+  say "→ gh not authenticated — starting browser OAuth flow"
+  gh auth login --hostname github.com --git-protocol https --web
+  gh auth status >/dev/null 2>&1 || die "gh auth still not configured — re-run installer when you've completed the OAuth flow"
+  say "✓ gh authenticated"
+}
+
+# ---------- if managed mode, install gh + auth BEFORE the clone step ----------
+# Managed mode needs to clone a private repo, which means gh-authed access.
+# Doing this before ensure_git so the operator goes through one combined
+# install sequence instead of "you're missing gh, here's how to get it, now
+# re-run."
+#
+# Detect managed mode from:
+#   (a) MANAGED_MODE=1 set by the mode prompt
+#   (b) --managed in the pass-through flags
+#   (c) REPO env var pointing at anything other than the default public kit
+for arg in "$@"; do
+  if [ "$arg" = "--managed" ]; then MANAGED_MODE=1; fi
+done
+if [ "$REPO" != "d00ks/claude-agent-kit" ]; then MANAGED_MODE=1; fi
+
+if [ "${MANAGED_MODE:-0}" = "1" ]; then
+  say "managed-service mode detected → ensuring gh + auth before clone"
+  ensure_gh
+  ensure_gh_authed
+fi
 
 # ---------- 1. git ----------
 if ! command -v git >/dev/null 2>&1; then
