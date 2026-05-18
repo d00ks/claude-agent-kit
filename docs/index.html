@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>claude-agent-kit — interview-driven scaffolder for personal Claude Code agents</title>
+  <meta name="description" content="Interview-driven scaffolder that takes you through ~5 questions and outputs a working personal agent on top of Claude Code. Vault-shape architecture, opt-in capability modules, EA + Financial Advisor archetypes, Telegram + Slack providers.">
+
+  <meta property="og:title" content="claude-agent-kit">
+  <meta property="og:description" content="Interview-driven scaffolder for personal Claude Code agents. Vault-shape architecture, opt-in capability modules, EA + Financial Advisor archetypes.">
+  <meta property="og:url" content="https://d00ks.github.io/claude-agent-kit/">
+  <meta property="og:type" content="website">
+
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>claude-agent-kit</h1>
+      <p class="tagline">Interview-driven scaffolder for personal Claude Code agents.</p>
+    </header>
+
+    <section class="install">
+      <h2>Install on a fresh machine</h2>
+      <p class="hint">macOS or Linux. No prereqs — installer auto-fetches git, bun, and Claude Code.</p>
+      <div class="code-block">
+        <pre id="install-cmd">curl -fsSL https://raw.githubusercontent.com/d00ks/claude-agent-kit/main/install.sh | bash</pre>
+        <button id="copy-btn" type="button" aria-label="Copy install command">Copy</button>
+      </div>
+      <p class="hint">Wizard prompts you for everything: provider (Telegram or Slack), modules, output dir, label. Auto-chains the bootstrap. <strong>No flags, no env vars.</strong></p>
+    </section>
+
+    <section>
+      <h2>What it gives you</h2>
+      <ul>
+        <li>A vault-shaped working directory the agent reads / writes — markdown, inspectable, survives restarts.</li>
+        <li>A persona <code>CLAUDE.md</code> tuned to an archetype: <strong>Executive Assistant</strong> or <strong>Financial Advisor</strong>.</li>
+        <li>Opt-in capability modules dropped into <code>.claude/skills/</code> — read at runtime.</li>
+        <li>Telegram or Slack messaging via the official Anthropic plugins.</li>
+        <li>A heartbeat <code>/loop</code> that runs on a cron and drains the agent's inbox.</li>
+        <li>A launchd plist (macOS) so the agent restarts itself.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Capability modules</h2>
+      <table>
+        <thead><tr><th>Module</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>inbox-triage</code></td><td>Urgent / defer / delegate routing. Vacation-mode toggle.</td></tr>
+          <tr><td><code>calendar</code></td><td>Read, create, move, cancel events. Conflict detection.</td></tr>
+          <tr><td><code>scheduling</code></td><td>Multi-party scheduling with time-zone math.</td></tr>
+          <tr><td><code>follow-up-tracking</code></td><td>Lightweight CRM — last-contact + next-action per relationship.</td></tr>
+          <tr><td><code>meeting-prep</code></td><td>Pre-meeting context bundles 30 min before each meeting.</td></tr>
+          <tr><td><code>comms-drafts</code></td><td>Draft replies in the operator's voice. Drafts only (V1).</td></tr>
+          <tr><td><code>light-research</code></td><td>Web / doc fetch + summarize.</td></tr>
+          <tr><td><code>google-workspace</code></td><td>Gmail / Drive / Sheets / Docs / Calendar via the <code>gog</code> CLI. Requires a GCP project.</td></tr>
+          <tr><td><code>google-workspace-mcp</code></td><td>Gmail / Drive / Calendar via Anthropic's hosted MCP. 60s OAuth, zero GCP setup.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Architecture</h2>
+      <p>A flat, inspectable markdown tree the agent reads + writes. Restart-survivable because state lives on disk.</p>
+      <pre class="tree">your-vault/
+├── CLAUDE.md                # root agent instructions
+├── INDEX.md                 # vault map
+├── HANDOFF.md               # operator runbook
+├── bootstrap.sh             # one-shot setup
+├── personas/
+│   └── &lt;persona-name&gt;/
+│       ├── CLAUDE.md        # archetype-templated instructions
+│       ├── inbox/           # tasks others drop here
+│       ├── processing/      # in-flight work
+│       └── memory/          # daily logs
+├── shared/
+│   ├── MEMORY.md            # canonical operator preferences
+│   └── memory/
+│       ├── active-tasks.md
+│       ├── lessons.md
+│       └── feedback.md
+└── .claude/
+    ├── skills/&lt;module&gt;/SKILL.md
+    └── plugins/&lt;provider&gt;/</pre>
+    </section>
+
+    <section>
+      <h2>How agents adapt over time</h2>
+      <p>Every operator correction + preference is first-class data. The agent treats <em>workflow rule tuning</em> (triage thresholds, escalation criteria, routing logic, delegate rules, sensitive-topic list) as its own responsibility — it edits <code>shared/MEMORY.md</code> in operation, no human-in-the-loop. Memory hygiene is a hard rule: state changes get logged to today's daily note <em>before</em> the user-visible reply.</p>
+      <p>Onboarding is conversational + iterative. The agent asks the operator about themselves over the first few sessions and fills in <code>{{placeholders}}</code> in its own <code>CLAUDE.md</code> as it learns.</p>
+    </section>
+
+    <section>
+      <h2>Links</h2>
+      <ul class="links">
+        <li><a href="https://github.com/d00ks/claude-agent-kit">GitHub repo</a></li>
+        <li><a href="https://github.com/d00ks/claude-agent-kit/blob/main/README.md">README</a></li>
+        <li><a href="https://github.com/d00ks/claude-agent-kit/blob/main/CONTRIBUTING.md">Contributing</a></li>
+        <li><a href="https://github.com/d00ks/claude-agent-kit/blob/main/SECURITY.md">Security policy</a></li>
+        <li><a href="https://github.com/d00ks/claude-agent-kit/issues">Issues</a></li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>MIT licensed. Built on <a href="https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview">Claude Code</a> + Anthropic's <a href="https://github.com/anthropics/claude-plugins-official">official plugins</a>.</p>
+    </footer>
+  </main>
+
+  <script>
+    const btn = document.getElementById('copy-btn');
+    const cmd = document.getElementById('install-cmd');
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(cmd.textContent.trim());
+        const orig = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+      } catch (e) {
+        btn.textContent = 'Press Ctrl/⌘+C';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+      }
+    });
+  </script>
+</body>
+</html>
