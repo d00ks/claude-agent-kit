@@ -1,0 +1,24 @@
+{
+  "name": "agent-scaffolder",
+  "version": "0.1.0",
+  "description": "Interview-driven scaffolder for Claude Code-based operator agents. Outputs a Jarvis-vault-shaped install dir.",
+  "type": "module",
+  "bin": {
+    "agent-scaffolder": "./bin/agent-scaffolder.ts"
+  },
+  "scripts": {
+    "build": "bun build ./bin/agent-scaffolder.ts --outdir ./dist --target bun",
+    "scaffold": "bun ./bin/agent-scaffolder.ts",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0"
+  }
+}

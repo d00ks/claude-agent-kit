@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# restart.sh — restart the persona's Claude Code session.
+#
+# Kills the tmux session (which terminates the Claude Code process inside it),
+# then kickstarts the launchd job so it respawns cleanly.
+
+set -euo pipefail
+
+LABEL="{{label}}"
+PERSONA="{{persona_name}}"
+LAUNCHD_LABEL="com.${LABEL}.${PERSONA}"
+
+echo "▶ restart.sh for install '$LABEL' / persona '$PERSONA'"
+
+if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$PERSONA" 2>/dev/null; then
+  echo "  killing tmux session: $PERSONA"
+  tmux kill-session -t "$PERSONA"
+fi
+
+# Give Telegram's getUpdates poll lock 30+ sec to release (lesson learned from
+# 2026-05-14 Atlas restart sequence). Skip for Slack (Socket Mode has no lock).
+case "{{provider}}" in
+  telegram)
+    echo "  waiting 35s for poll-lock release"
+    sleep 35
+    ;;
+esac
+
+if launchctl list "$LAUNCHD_LABEL" >/dev/null 2>&1; then
+  echo "  kickstarting launchd: $LAUNCHD_LABEL"
+  launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
+else
+  echo "  no launchd job '$LAUNCHD_LABEL' is loaded."
+  echo "  bootstrap first with: launchctl bootstrap gui/\$(id -u) \\"
+  echo "    \$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+  exit 1
+fi
+
+echo "✓ restart complete. Tail logs with:"
+echo "  tail -f \$(dirname \"\${BASH_SOURCE[0]}\")/session.log"

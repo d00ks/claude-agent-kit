@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# bootstrap.sh — one-shot setup for this operator vault.
+#
+# Idempotent. Safe to re-run.
+#
+# What it does:
+#   1. Verifies Claude Code is installed.
+#   2. Verifies Bun is installed (required for the messaging plugin).
+#   3. Clones the chosen messaging plugin into .claude/plugins/{{provider}}/.
+#   4. Creates a per-install state dir for the plugin under
+#      ~/.claude/channels/{{provider}}-{{label}}/ with .env + access.json skeletons.
+#   5. Writes a launchd plist that runs Claude Code with the plugin attached.
+#   6. Prints next steps for the operator.
+
+set -euo pipefail
+
+LABEL="{{label}}"
+PROVIDER="{{provider}}"
+PERSONA="{{persona_name}}"
+VAULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Provider-specific config. Plugin slugs default to Anthropic-published
+# plugins; override at scaffold or bootstrap time via env vars if you want
+# to point at a fork (topic-routing fork, custom auth, etc.).
+case "$PROVIDER" in
+  telegram)
+    PLUGIN_SLUG="${TELEGRAM_PLUGIN_SLUG:-anthropics/claude-plugins-official}"
+    STATE_VAR="TELEGRAM_STATE_DIR"
+    TOKEN_VARS=("TELEGRAM_BOT_TOKEN")
+    ;;
+  slack)
+    PLUGIN_SLUG="${SLACK_PLUGIN_SLUG:-anthropics/claude-plugins-official}"
+    STATE_VAR="SLACK_STATE_DIR"
+    TOKEN_VARS=("SLACK_BOT_TOKEN" "SLACK_APP_TOKEN")
+    ;;
+  *)
+    echo "✗ unknown provider '$PROVIDER'" >&2
+    exit 2
+    ;;
+esac
+
+# Clone helper: prefer `gh repo clone` (handles auth for private repos),
+# fall back to `git clone` over HTTPS.
+clone_or_pull() {
+  local slug="$1" dest="$2"
+  if [ -d "$dest/.git" ]; then
+    git -C "$dest" pull --rebase --quiet
+    return
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    gh repo clone "$slug" "$dest" -- --quiet
+  else
+    git clone --quiet "https://github.com/$slug.git" "$dest"
+  fi
+}
+
+PLUGIN_DIR="$VAULT_DIR/.claude/plugins/$PROVIDER"
+STATE_DIR="$HOME/.claude/channels/$PROVIDER-$LABEL"
+LAUNCHD_LABEL="com.${LABEL}.${PERSONA}"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+
+echo "▶ bootstrap.sh"
+echo "  vault:     $VAULT_DIR"
+echo "  label:     $LABEL"
+echo "  provider:  $PROVIDER"
+echo "  persona:   $PERSONA"
+echo ""
+
+# ---------- prereq install helpers ----------
+# Auto-install missing prerequisites on fresh machines. Each helper is
+# idempotent (no-op if already installed) and prefers system-standard install
+# paths (Homebrew on macOS, apt/yum on Linux, official installer scripts
+# otherwise). Set BOOTSTRAP_NO_INSTALL=1 to skip auto-install + fail loudly.
+
+UNAME="$(uname)"
+
+prompt_yes() {
+  # Returns 0 if user types y/Y or BOOTSTRAP_YES=1; 1 otherwise.
+  if [ "${BOOTSTRAP_YES:-}" = "1" ]; then return 0; fi
+  printf "%s [Y/n] " "$1"
+  read -r ans
+  case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
+}
+
+# Detect which shell rc files exist + are likely sourced on shell startup.
+# Returns space-separated paths. Empty if none detected.
+detect_shell_rc_files() {
+  local files=""
+  case "${SHELL:-}" in
+    */zsh)
+      [ -f "$HOME/.zshrc" ] || touch "$HOME/.zshrc"
+      files="$HOME/.zshrc"
+      ;;
+    */bash)
+      # macOS bash login shells read .bash_profile; Linux bash interactive shells read .bashrc.
+      if [ "$UNAME" = "Darwin" ] && [ -f "$HOME/.bash_profile" ]; then files="$HOME/.bash_profile"
+      elif [ -f "$HOME/.bashrc" ]; then files="$HOME/.bashrc"
+      elif [ -f "$HOME/.profile" ]; then files="$HOME/.profile"
+      else touch "$HOME/.bashrc"; files="$HOME/.bashrc"
+      fi
+      ;;
+    *)
+      # Unknown shell — fall back to .profile (POSIX-standard, usually sourced).
+      [ -f "$HOME/.profile" ] || touch "$HOME/.profile"
+      files="$HOME/.profile"
+      ;;
+  esac
+  echo "$files"
+}
+
+# Persist a `export PATH=...:$PATH` line into the user's shell rc file(s).
+# Idempotent — checks for an existing line with the same dir before appending.
+# Also exports for the CURRENT script run so subsequent steps see the change.
+ensure_in_path_persistent() {
+  local dir="$1"
+  local label="${2:-$dir}"
+  # current-shell export
+  case ":$PATH:" in *":$dir:"*) ;; *) export PATH="$dir:$PATH" ;; esac
+  # persist for future shells
+  local rc_files
+  rc_files="$(detect_shell_rc_files)"
+  local marker="# added by agent-scaffolder bootstrap.sh: $label"
+  for rc in $rc_files; do
+    if [ -f "$rc" ] && ! grep -qF "$marker" "$rc"; then
+      {
+        echo ""
+        echo "$marker"
+        echo "export PATH=\"$dir:\$PATH\""
+      } >> "$rc"
+      echo "  ↳ added $label to PATH in $rc (open a new shell or \`source $rc\` to pick up)"
+    fi
+  done
+}
+
+ensure_xcode_clt() {
+  # macOS only — Command Line Tools required for Homebrew + many shell utils.
+  if [ "$UNAME" != "Darwin" ]; then return 0; fi
+  if xcode-select -p >/dev/null 2>&1; then return 0; fi
+  echo "  → installing Xcode Command Line Tools (GUI prompt will appear)"
+  xcode-select --install 2>/dev/null || true
+  echo "  ↳ accept the GUI prompt + wait for install, then re-run bootstrap.sh"
+  exit 1
+}
+
+ensure_brew() {
+  # macOS only — Homebrew is how we install almost everything on Mac.
+  if [ "$UNAME" != "Darwin" ]; then return 0; fi
+  if command -v brew >/dev/null 2>&1; then return 0; fi
+  ensure_xcode_clt
+  echo "  → installing Homebrew (will sudo-prompt)"
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  # Source the new brew shellenv so this script can find it.
+  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"
+  fi
+}
+
+linux_pkg_install() {
+  # $1 = package name. Tries apt → dnf → yum → pacman; fails loud if none.
+  local pkg="$1"
+  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y "$pkg"
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$pkg"
+  elif command -v yum >/dev/null 2>&1; then sudo yum install -y "$pkg"
+  elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --noconfirm "$pkg"
+  else echo "✗ no supported package manager (apt/dnf/yum/pacman) — install $pkg manually" >&2; return 1
+  fi
+}
+
+ensure_tmux() {
+  if command -v tmux >/dev/null 2>&1; then return 0; fi
+  echo "→ tmux not found"
+  if [ "${BOOTSTRAP_NO_INSTALL:-}" = "1" ]; then echo "  install manually + re-run (BOOTSTRAP_NO_INSTALL=1)" >&2; exit 1; fi
+  prompt_yes "  install tmux now?" || { echo "  skipped — install manually + re-run" >&2; exit 1; }
+  if [ "$UNAME" = "Darwin" ]; then ensure_brew && brew install tmux
+  else linux_pkg_install tmux
+  fi
+}
+
+ensure_claude_code() {
+  if command -v claude >/dev/null 2>&1; then return 0; fi
+  echo "→ claude-code CLI not found"
+  if [ "${BOOTSTRAP_NO_INSTALL:-}" = "1" ]; then echo "  install manually + re-run (BOOTSTRAP_NO_INSTALL=1)" >&2; exit 1; fi
+  prompt_yes "  install claude-code now via the official installer?" || { echo "  skipped — install from https://docs.claude.com/en/docs/agents-and-tools/claude-code/installation + re-run" >&2; exit 1; }
+  curl -fsSL https://claude.ai/install.sh | bash
+  # The installer drops `claude` into one of ~/.local/bin, /usr/local/bin,
+  # or /opt/homebrew/bin depending on perms + platform. Persist whichever
+  # one ended up with the binary into the shell rc so future shells find it
+  # without re-running this script.
+  local found=""
+  for dir in "$HOME/.local/bin" "$HOME/.claude/local/bin" /usr/local/bin /opt/homebrew/bin; do
+    if [ -x "$dir/claude" ]; then found="$dir"; break; fi
+  done
+  if [ -n "$found" ]; then
+    ensure_in_path_persistent "$found" "claude-code"
+  fi
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "✗ claude not in PATH after install. Try opening a new shell and re-running, or add the install dir to PATH manually." >&2
+    echo "  Tried: ~/.local/bin, ~/.claude/local/bin, /usr/local/bin, /opt/homebrew/bin" >&2
+    exit 1
+  fi
+}
+
+ensure_bun() {
+  if command -v bun >/dev/null 2>&1; then return 0; fi
+  echo "→ bun not found (required by the messaging plugin)"
+  if [ "${BOOTSTRAP_NO_INSTALL:-}" = "1" ]; then echo "  install manually + re-run (BOOTSTRAP_NO_INSTALL=1)" >&2; exit 1; fi
+  prompt_yes "  install bun now via the official installer?" || { echo "  skipped — install via curl -fsSL https://bun.sh/install | bash + re-run" >&2; exit 1; }
+  curl -fsSL https://bun.sh/install | bash
+  # bun installer always uses ~/.bun/bin (no fallback). Persist + re-export.
+  ensure_in_path_persistent "$HOME/.bun/bin" "bun"
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "✗ bun not in PATH after install — open a new shell + re-run, or \`source ~/.bashrc\`/\`source ~/.zshrc\` first" >&2
+    exit 1
+  fi
+}
+
+ensure_gh() {
+  # Optional — bootstrap will fall back to HTTPS clone if absent. Try to
+  # install anyway so private plugin clones work without interactive prompt.
+  if command -v gh >/dev/null 2>&1; then return 0; fi
+  echo "→ gh CLI not found (optional but recommended for private plugin clones)"
+  if [ "${BOOTSTRAP_NO_INSTALL:-}" = "1" ]; then return 0; fi
+  prompt_yes "  install gh now? (skip is fine — HTTPS fallback works for public plugins)" || return 0
+  if [ "$UNAME" = "Darwin" ]; then ensure_brew && brew install gh
+  else linux_pkg_install gh || true
+  fi
+}
+
+ensure_obsidian() {
+  # Optional UX nice-to-have. The vault is a Jarvis-vault-shape markdown
+  # tree — the agent reads/writes it with file tools, but the operator gets
+  # backlinking + search + graph view if they open it in Obsidian. Not a
+  # hard prereq; the agent works fine without it.
+  if [ "$UNAME" = "Darwin" ]; then
+    [ -d "/Applications/Obsidian.app" ] && { echo "✓ Obsidian.app present"; return 0; }
+  elif command -v obsidian >/dev/null 2>&1; then
+    echo "✓ obsidian: $(obsidian --version 2>&1 | head -1)"; return 0
+  fi
+  echo "→ Obsidian not found (optional — for operator to browse the vault visually)"
+  if [ "${BOOTSTRAP_NO_INSTALL:-}" = "1" ]; then return 0; fi
+  prompt_yes "  install Obsidian now? (skip is fine — agent works without it)" || return 0
+  if [ "$UNAME" = "Darwin" ]; then
+    ensure_brew && brew install --cask obsidian
+    [ -d "/Applications/Obsidian.app" ] && echo "  ↳ Obsidian.app installed. Open it + 'Open folder as vault' → select $VAULT_DIR"
+  else
+    echo "  → Linux Obsidian install isn't auto-handled (varies: .deb / .AppImage / Snap / Flatpak)"
+    echo "    Get it from https://obsidian.md/download + open this dir as a vault."
+  fi
+}
+
+# ---------- 1. Claude Code ----------
+ensure_claude_code
+echo "✓ claude-code: $(claude --version 2>&1 | head -1)"
+
+# ---------- 2. Bun ----------
+ensure_bun
+echo "✓ bun: $(bun --version)"
+
+# ---------- 2.5. tmux + gh + Obsidian ----------
+ensure_tmux
+echo "✓ tmux: $(tmux -V)"
+ensure_gh
+if command -v gh >/dev/null 2>&1; then echo "✓ gh: $(gh --version | head -1)"; fi
+ensure_obsidian
+
+# ---------- 3. Clone / update the plugin ----------
+mkdir -p "$VAULT_DIR/.claude/plugins"
+echo "▶ fetching $PROVIDER plugin ($PLUGIN_SLUG)"
+clone_or_pull "$PLUGIN_SLUG" "$PLUGIN_DIR"
+echo "▶ installing plugin deps via bun"
+( cd "$PLUGIN_DIR" && bun install --silent )
+
+# ---------- 4. Per-install state dir ----------
+mkdir -p "$STATE_DIR/inbox" "$STATE_DIR/downloads"
+chmod 700 "$STATE_DIR"
+
+# .env skeleton (only seed; don't overwrite an existing one).
+if [ ! -f "$STATE_DIR/.env" ]; then
+  echo "▶ seeding $STATE_DIR/.env"
+  case "$PROVIDER" in
+    telegram)
+      cat > "$STATE_DIR/.env" <<EOF
+# Per-install Telegram plugin env for label '$LABEL'.
+# Set TELEGRAM_BOT_TOKEN after creating a bot via @BotFather.
+TELEGRAM_BOT_TOKEN=
+# Optional: scope a single bot to a forum-topic in a supergroup.
+# TELEGRAM_TOPIC_FILTER=42
+EOF
+      ;;
+    slack)
+      cat > "$STATE_DIR/.env" <<EOF
+# Per-install Slack plugin env for label '$LABEL'.
+# Set both tokens after creating a Slack app + enabling Socket Mode.
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+# Optional: lock down runtime state mutations.
+# SLACK_ACCESS_MODE=static
+EOF
+      ;;
+  esac
+  chmod 600 "$STATE_DIR/.env"
+fi
+
+# access.json skeleton.
+if [ ! -f "$STATE_DIR/access.json" ]; then
+  echo "▶ seeding $STATE_DIR/access.json"
+  case "$PROVIDER" in
+    telegram)
+      printf '%s\n' '{"version":1,"users":{},"groups":{},"pending":{}}' > "$STATE_DIR/access.json"
+      ;;
+    slack)
+      printf '%s\n' '{"version":1,"workspaces":{},"pending":{}}' > "$STATE_DIR/access.json"
+      ;;
+  esac
+  chmod 600 "$STATE_DIR/access.json"
+fi
+
+# ---------- 5. start.sh + launchd plist ----------
+START_SCRIPT="$VAULT_DIR/start.sh"
+echo "▶ writing $START_SCRIPT"
+cat > "$START_SCRIPT" <<EOF
+#!/usr/bin/env bash
+# Boots the persona's Claude Code session with the messaging plugin attached.
+# Invoked by launchd via $LAUNCHD_PLIST. You can also run it manually inside tmux.
+
+set -euo pipefail
+
+export $STATE_VAR="$STATE_DIR"
+
+# tmux session name = persona for easy attach: tmux attach -t $PERSONA
+exec tmux new-session -A -s "$PERSONA" \\
+  "cd $VAULT_DIR && claude --plugin-dir $PLUGIN_DIR"
+EOF
+chmod +x "$START_SCRIPT"
+
+echo "▶ writing $LAUNCHD_PLIST"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$LAUNCHD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>           <string>$LAUNCHD_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$START_SCRIPT</string>
+  </array>
+  <key>RunAtLoad</key>       <true/>
+  <key>KeepAlive</key>       <true/>
+  <key>StandardOutPath</key> <string>$VAULT_DIR/session.log</string>
+  <key>StandardErrorPath</key><string>$VAULT_DIR/session.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>          <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>$STATE_VAR</key>    <string>$STATE_DIR</string>
+  </dict>
+</dict>
+</plist>
+EOF
+chmod 600 "$LAUNCHD_PLIST"
+
+# ---------- 6. next steps ----------
+echo ""
+echo "✓ bootstrap complete."
+echo ""
+echo "Next steps:"
+echo ""
+echo "  1. Drop the $PROVIDER bot credentials into the env file or Keychain:"
+for VAR in "${TOKEN_VARS[@]}"; do
+  echo "       $VAR — set in $STATE_DIR/.env"
+done
+echo "     (Or use Keychain via ./bootstrap-secret and reference the values from .env.)"
+echo ""
+echo "  2. Start the agent:"
+echo "       launchctl bootstrap gui/\$(id -u) $LAUNCHD_PLIST"
+echo "     (Or run ./start.sh inside tmux to debug.)"
+echo ""
+echo "  3. Message the agent on $PROVIDER. The first message triggers its"
+echo "     onboarding interview — it fills in the {{ slots }} in CLAUDE.md"
+echo "     and persona docs from the conversation."
+echo ""
+echo "Logs: $VAULT_DIR/session.log"
+echo "Stop: launchctl bootout gui/\$(id -u)/$LAUNCHD_LABEL   (or ./restart.sh)"

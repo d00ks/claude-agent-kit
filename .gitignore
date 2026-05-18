@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+
+# scaffolded vaults often live alongside the source for development; never commit them
+generated/
+/tmp/
+*.log

@@ -1,0 +1,14 @@
+# Urgent Reminders
+
+Small heartbeat-readable list for time-sensitive reminders that shouldn't get lost in general memory.
+
+Format rules:
+- Keep entries explicit and normalized.
+- `remind_after` is an absolute local timestamp in `{{timezone}}` when possible.
+- `repeat` can be: none | daily | weekdays | weekly.
+- `last_alerted` is updated when a reminder is actually sent.
+- Mark `status: done` instead of deleting if completion timing matters.
+
+---
+
+_(empty)_

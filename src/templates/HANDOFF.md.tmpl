@@ -1,0 +1,226 @@
+# Install Handoff — `{{label}}`
+
+This file walks you through running and maintaining the scaffolded agent. The agent itself can answer most of these questions via {{provider_label}} once it's booted — this doc is the static reference.
+
+**Scaffolded:** {{scaffolded_date}} via agent-scaffolder v{{scaffolder_version}}
+**Provider:** {{provider_label}}
+**Install label:** `{{label}}` (used to namespace Keychain entries)
+**Capability modules:** {{modules_csv}}
+
+---
+
+## 1. Starting the agent
+
+```bash
+cd <this-directory>
+./bootstrap.sh           # one-shot setup
+```
+
+Then message the agent on {{provider_label}}. The first message you send triggers the agent's onboarding interview — it will ask about you (operator name, role, organization, hierarchy, tasks, tone, sensitive data). The agent fills in the `{{slots}}` it sees in `CLAUDE.md` and persona docs as it learns.
+
+You don't need to answer everything in one session. The agent iterates.
+
+---
+
+## 2. `/loop` mechanics (heartbeat cadence)
+
+The agent runs a recurring heartbeat via Claude Code's `/loop` skill. Standard pattern:
+
+```
+/loop 30m run the heartbeat per personas/{{persona_name}}/CLAUDE.md (drain processing/ then inbox/, memory log, active-build state). If nothing to do, reply HEARTBEAT_OK and stop.
+```
+
+Cron-style shorthand:
+
+| You want | Cron |
+|---|---|
+| every 5 min | `*/5 * * * *` |
+| every 20 min | `*/20 * * * *` (or pick off-peak: `7,27,47 * * * *`) |
+| every 30 min | `*/30 * * * *` (or `7,37 * * * *` to avoid global pile-up) |
+| hourly | `0 * * * *` (or `7 * * * *`) |
+| weekdays 9am | `0 9 * * 1-5` |
+
+### ⚠️ The 7-day auto-expiry gotcha
+
+`CronCreate` (the tool behind `/loop`) **auto-deletes recurring tasks after 7 days.** They fire one final time, then disappear. This means:
+
+- After a week, the heartbeat stops firing silently.
+- After a `/clear`, **all crons die** — they live only in the session.
+- Re-arm the heartbeat every time you `/clear` or restart the session.
+
+The agent knows this and will re-arm itself at session start. If you notice the heartbeat hasn't fired in 30+ min after a restart, message the agent: "are you /loop-ed?"
+
+### Re-arming after `/clear`
+
+```
+heartbeat — drain personas/{{persona_name}}/inbox/ ... [full heartbeat instruction]
+```
+
+Then the agent re-runs `/loop` with the same cadence.
+
+---
+
+## 3. Backup risks + mitigations
+
+⚠️ V1 does NOT configure backups. This is by design — operator-shaped backups (what's worth saving on YOUR machine) are case-by-case.
+
+But the risks are real and worth understanding:
+
+### Why backups matter
+
+The agent runtime holds:
+- OAuth tokens (Gmail, Calendar, Slack/Telegram)
+- API keys (Anthropic, any vendor seats)
+- Accumulated state in `shared/memory/` (months of context — your operator profile, your hierarchy, your patterns)
+- Client-specific docs you've shared with the agent
+
+Losing this = full re-pairing cycle with every service AND losing the personalization history.
+
+### Risks
+
+- **Hardware failure** — disk dies; Mac Mini fails.
+- **Agent error** — accidental `rm -rf` of a directory.
+- **Ransomware / malware.**
+- **Drive theft.**
+- **Account compromise** — someone gets your laptop login.
+
+### Mitigation options (operator picks)
+
+| Tier | Tool | Coverage | Trade-off |
+|---|---|---|---|
+| Local snapshot | Time Machine | Files, hourly | Native macOS, easy to set up; tied to one external drive |
+| Local snapshot (better) | restic | Files, dedupe, hourly | Cross-platform, snapshots compress/dedupe well |
+| Cloud offsite | restic → R2 / B2 / S3 | Survives local disaster | Costs $1–5/mo; needs encryption passphrase backed up SEPARATELY |
+| Git-vault | git commit + push to private remote | Granular diff history | Doesn't capture binary/large files cleanly |
+| Keychain | `security export` to encrypted file | OAuth + API keys specifically | Easy to forget; manual cadence |
+
+**Recommendation:** at minimum, set up Time Machine. If you trust cloud, layer in `restic → R2` daily. The agent can walk you through any of these via {{provider_label}}.
+
+---
+
+## 4. Swapping the LLM
+
+Default: Anthropic Claude via Claude Code's standard config.
+
+To swap to a different model:
+
+- **OpenAI** — set `CLAUDE_CODE_USE_OPENAI=1` in your environment, drop your key via `./bootstrap-secret {{label}}_openai_api_key sk-...`
+- **Local Llama via Ollama** — point Claude Code at `http://localhost:11434/v1/` (OpenAI-compatible endpoint).
+- **Bedrock / Vertex** — see Claude Code's docs on model providers.
+
+Each has trade-offs. Anthropic Claude is the most tested with the agent's onboarding flow. Local models work for cost-sensitive installs but onboarding fidelity will be lower.
+
+---
+
+## 5. Manual commands (when bootstrap / start.sh / launchd isn't enough)
+
+Most operations go through `./bootstrap.sh` (one-time setup) and `./restart.sh` (after config changes), with launchd keeping the agent alive in the background. These are the underlying commands if you want to run things by hand or debug.
+
+### Launch Claude Code manually (no tmux, no launchd)
+
+```bash
+cd <vault-dir>
+claude --plugin-dir .claude/plugins/{{provider}}
+```
+
+If running headless (no GUI prompt for permission approvals — e.g. a VM, a remote SSH session, a container), add the skip-permissions flag:
+
+```bash
+claude --plugin-dir .claude/plugins/{{provider}} --dangerously-skip-permissions
+```
+
+### Launch via tmux (matches what `start.sh` does)
+
+```bash
+tmux new-session -A -s {{persona_name}} "cd <vault-dir> && claude --plugin-dir .claude/plugins/{{provider}}"
+```
+
+Attach to a running session:
+
+```bash
+tmux attach -t {{persona_name}}
+```
+
+Detach without killing: `Ctrl-b` then `d`.
+
+### Restart
+
+```bash
+./restart.sh
+```
+
+Or manually: kill the tmux session, then `launchctl kickstart -k gui/$(id -u)/com.{{label}}.{{persona_name}}`.
+
+### Secrets management
+
+```bash
+# Set a secret in Keychain (used by the plugin / agent for OAuth tokens, API keys, etc.):
+./bootstrap-secret {{label}}_<key-name> <value>
+
+# Example: rotate the messaging-plugin bot token:
+./bootstrap-secret {{label}}_{{provider}}_bot_token <new-token>
+./restart.sh
+```
+
+### Status checks
+
+```bash
+# Is the launchd plist loaded?
+launchctl list | grep com.{{label}}
+
+# Is the tmux session running?
+tmux has-session -t {{persona_name}} && echo "running" || echo "down"
+
+# Tail the persona's recent stdout/stderr (launchd-redirected logs):
+tail -f /tmp/{{label}}-{{persona_name}}.{out,err}
+
+# Claude Code version:
+claude --version
+```
+
+### Reset / clear the session
+
+If the operator says "reset", "clear", or "start fresh":
+
+```bash
+bash <vault-dir>/clear-self.sh operator-requested
+```
+
+This sends `/clear` to the running session + injects a re-orient prompt. The session loses live context but vault state (memory, drafts, decisions, etc.) persists.
+
+---
+
+## 6. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Bot not responding | {{provider_label}} plugin failed to start | Check Claude Code session output for plugin errors; `./restart.sh` |
+| Agent stuck mid-`/clear` | Cache eviction edge case | Wait 30s, then send a fresh message |
+| Heartbeat hasn't fired in 30+ min | `/loop` not re-armed after `/clear` or 7-day expiry | Send "are you /loop-ed?" — agent re-arms |
+| Plugin auth expired | OAuth token rotated / revoked | Re-run `./bootstrap-secret {{label}}_*_token <new-value>`; `./restart.sh` |
+| Onboarding placeholders still showing | Agent hasn't completed onboarding for that slot | Just answer the questions it asks; it edits the docs incrementally |
+| Sensitive data leaked into a draft | Sensitive-data list incomplete | Tell the agent: "add `<thing>` to the sensitive-data list" — it edits `shared/MEMORY.md` |
+
+If something's actually broken, the agent can usually explain its own state via {{provider_label}}. Ask: "what's wrong?"
+
+---
+
+## 7. Adding capability modules post-install (manual)
+
+Modules live under `.claude/skills/<module-name>/`. Each module is a directory with a `SKILL.md` describing what it does and how the agent invokes it.
+
+To add a module after the initial install:
+
+```bash
+# from inside the agent-scaffolder repo:
+cp -r <agent-scaffolder>/skills/<module-name> <this-vault>/.claude/skills/
+```
+
+Restart the agent (`./restart.sh`) and it picks up the new skill.
+
+Available V1 modules: inbox-triage, calendar, scheduling, follow-up-tracking, meeting-prep, comms-drafts, light-research, google-workspace, google-workspace-mcp, zapier-webhook.
+Planned V1.1: travel, expenses, send-on-behalf comms.
+
+---
+
+*Scaffolded {{scaffolded_date}} via agent-scaffolder v{{scaffolder_version}}.*
