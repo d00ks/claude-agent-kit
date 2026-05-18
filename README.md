@@ -16,38 +16,40 @@ Personal agents are increasingly viable, but the path from "interesting idea" to
 
 ## Quick start
 
-Requires macOS or Linux. The bootstrap script auto-installs missing prereqs (Claude Code CLI, Bun, tmux, optionally `gh` and Obsidian).
+Requires macOS or Linux. Everything else (git, Bun, Claude Code CLI, tmux, optional Obsidian) is auto-installed by the bootstrap on a fresh machine.
+
+**One-line install on a fresh machine:**
 
 ```bash
-# 1. Clone this repo
-git clone https://github.com/d00ks/claude-agent-kit.git
-cd claude-agent-kit
-bun install
-
-# 2. Generate a vault
-bun bin/agent-scaffolder.ts install
-#   → walks you through 5 Qs (provider, modules, output dir, label, persona name)
-
-# 3. Bootstrap the vault you just generated
-cd <output-dir>
-BOOTSTRAP_YES=1 ./bootstrap.sh
-#   → auto-installs prereqs, clones the messaging plugin, writes a launchd plist
-#   → drops you instructions on the bot-token and OAuth steps next
-
-# 4. Message your bot on Telegram (or Slack) — the agent walks the operator
-#    through onboarding from there
+curl -fsSL https://raw.githubusercontent.com/d00ks/claude-agent-kit/main/install.sh | bash -s -- --bootstrap
 ```
 
-Non-interactive scaffold (for CI / scripting):
+That clones the kit, installs prereqs, runs the interactive wizard, scaffolds your vault, then chains into `bootstrap.sh` to wire up Claude Code + the messaging plugin + a launchd plist.
+
+Non-interactive variant (for CI / scripting / shared machines):
 
 ```bash
-bun bin/agent-scaffolder.ts install \
+curl -fsSL https://raw.githubusercontent.com/d00ks/claude-agent-kit/main/install.sh | bash -s -- \
   --non-interactive \
   --provider telegram \
   --modules inbox-triage,calendar,scheduling,google-workspace-mcp \
   --out ~/Obsidian/my-agent \
-  --label my-agent
+  --label my-agent \
+  --bootstrap
 ```
+
+**After it runs**, message your bot on Telegram (or Slack — pick at the wizard prompt). The first message triggers the agent's onboarding interview; it iterates from there.
+
+### If you'd rather clone manually
+
+```bash
+git clone https://github.com/d00ks/claude-agent-kit.git
+cd claude-agent-kit
+bun install
+bun bin/agent-scaffolder.ts install --bootstrap
+```
+
+Same result. `install.sh` is just a thin wrapper that handles the clone + bun-install for you.
 
 ## Capability modules
 
