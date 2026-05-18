@@ -28,10 +28,67 @@
 
 set -euo pipefail
 
+# When invoked via `curl URL | bash`, stdin is the piped script, so `read`
+# prompts won't see the user's keystrokes. Re-attach to the controlling
+# terminal if one exists + is openable. Standard idiom for curl-pipe-bash
+# installers that need interactive input. Silently no-ops if there's no
+# usable tty (CI runners, sandboxes, etc.) — the mode prompt is skipped
+# in that case.
+TTY_AVAILABLE=0
+if [ -t 0 ]; then
+  TTY_AVAILABLE=1
+elif [ -e /dev/tty ] && (exec 0</dev/tty) 2>/dev/null; then
+  exec 0</dev/tty
+  TTY_AVAILABLE=1
+fi
+
 REPO="${REPO:-d00ks/claude-agent-kit}"
 DEST="${DEST:-$HOME/.claude-agent-kit}"
 UNAME="$(uname)"
 export BOOTSTRAP_YES="${BOOTSTRAP_YES:-1}"
+
+# ---------- 0. Mode selection (only if no flags + interactive terminal) ----------
+# When the user runs `curl URL | bash` with no flags, ask them what they
+# want up front so we don't need env vars or flag noise. Skip this if the
+# user already passed any args (they know what they're doing) or stdin
+# isn't a real terminal (CI / non-interactive contexts).
+EXTRA_FLAGS=()
+if [ "$#" -eq 0 ] && [ "$TTY_AVAILABLE" = "1" ]; then
+  echo "[install.sh] welcome — let's set up a Claude Code agent."
+  echo ""
+  echo "Modes:"
+  echo "  1) open-source      — clean install of the public kit. Best for self-hosting your own agent."
+  echo "  2) managed-service  — for builders running this as a service for someone else."
+  echo "                        Includes SSH + Tailscale overlay + builder identity baked into the agent."
+  echo ""
+  printf "Pick a mode [1/2, default 1]: "
+  read -r MODE_ANS
+  MODE_ANS="${MODE_ANS:-1}"
+  case "$MODE_ANS" in
+    2|managed|managed-service)
+      echo ""
+      printf "Repo slug for the managed-service variant (default: jarvbot/agent-scaffolder): "
+      read -r REPO_ANS
+      REPO="${REPO_ANS:-jarvbot/agent-scaffolder}"
+      echo ""
+      printf "Your name (you, the builder — shown in the agent's CLAUDE.md): "
+      read -r BUILDER_NAME_ANS
+      [ -n "$BUILDER_NAME_ANS" ] && export BUILDER_NAME="$BUILDER_NAME_ANS"
+      printf "Your Telegram user ID (numeric, e.g. 1234567890): "
+      read -r BUILDER_TG_ANS
+      [ -n "$BUILDER_TG_ANS" ] && export BUILDER_TELEGRAM_ID="$BUILDER_TG_ANS"
+      EXTRA_FLAGS+=(--bootstrap --managed)
+      echo ""
+      echo "[install.sh] managed-service mode → REPO=$REPO, BUILDER_NAME=${BUILDER_NAME:-?}, BUILDER_TELEGRAM_ID=${BUILDER_TELEGRAM_ID:-?}"
+      ;;
+    *)
+      EXTRA_FLAGS+=(--bootstrap)
+      echo ""
+      echo "[install.sh] open-source mode → REPO=$REPO"
+      ;;
+  esac
+  echo ""
+fi
 
 say() { echo "[install.sh] $*"; }
 die() { echo "[install.sh] ✗ $*" >&2; exit 1; }
@@ -104,4 +161,4 @@ say "✓ scaffolder deps installed"
 say "→ running scaffolder"
 echo ""
 cd "$DEST"
-exec bun bin/agent-scaffolder.ts install "$@"
+exec bun bin/agent-scaffolder.ts install "${EXTRA_FLAGS[@]:-}" "$@"

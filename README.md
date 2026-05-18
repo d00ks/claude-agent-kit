@@ -21,10 +21,10 @@ Requires macOS or Linux. Everything else (git, Bun, Claude Code CLI, tmux, optio
 **One-line install on a fresh machine:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/d00ks/claude-agent-kit/main/install.sh | bash -s -- --bootstrap
+curl -fsSL https://raw.githubusercontent.com/d00ks/claude-agent-kit/main/install.sh | bash
 ```
 
-That clones the kit, installs prereqs, runs the interactive wizard, scaffolds your vault, then chains into `bootstrap.sh` to wire up Claude Code + the messaging plugin + a launchd plist.
+That auto-installs git + bun, clones the kit, prompts you for mode (open-source / managed-service), runs the interactive wizard, scaffolds your vault, then chains into `bootstrap.sh` to wire up Claude Code + the messaging plugin + a launchd plist. **No flags, no env vars** — everything's asked at the prompt.
 
 Non-interactive variant (for CI / scripting / shared machines):
 
